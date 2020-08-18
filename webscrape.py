@@ -2,16 +2,9 @@ import requests
 import openpyxl
 from bs4 import BeautifulSoup as soup
 import re
-import os
-from dotenv import load_dotenv
-import time
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from captcha import solve_captcha
 
-load_dotenv()
-
+# Get search type for scraping (by query or link)
 search_type = input('Would you like to search by query (q) or link (l)? ').lower().strip()
 while not (search_type == 'q' or search_type == 'l'):
     print('Invalid input.')
@@ -26,7 +19,7 @@ elif search_type == 'l':
         link = input('Please insert a Newegg.com link to scrape: ').lower().strip()
     search_url = link
 
-
+# Get response to save data to spreadsheet or not
 save_data = input('Would you like to save scraped data? (y or n)? ').lower().strip()
 while not (save_data == 'y' or save_data == 'n'):
     print('Invalid input.')
@@ -36,11 +29,10 @@ if save_data == 'y':
 elif save_data == 'n':
     is_data_saved = False
 
-
+# String to set data to if info is not found on the webpage
 unfound_data_string = 'Not found'
 
-
-# Get response from desired Newegg URL
+# Get response from initial Newegg URL
 page_headers = {
     'authority': 'www.newegg.com',
     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.105 Safari/537.36',
@@ -55,73 +47,10 @@ response_html = initial_response.text
 # Parse HTML
 initial_soup = soup(response_html, 'html.parser')
 
-
-def solveCaptcha(soup_, url, max_retries=5):
-    driver = webdriver.Chrome(executable_path='./chromedriver.exe')
-    driver.get(url)
-    time.sleep(2)
-
-    try:
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'g-recaptcha')))
-        driver.execute_script(f'document.getElementById("g-recaptcha-response").innerHTML="";')
-        print('Found Google ReCaptcha.')
-    except:
-        print('Not a valid Google ReCaptcha. Restarting browser.')
-        driver.close()
-        solveCaptcha(soup_=soup_, url=url)
-
-    captcha_form_data = {
-        'method': 'userrecaptcha',
-        'googlekey': '6Ld0av8SAAAAAA_bWcLCPqT109QEfdRp0w50GCsq',
-        'key': os.getenv('2CAPTCHA_API_KEY'),
-        'pageurl': url,
-        'json': 1
-    }
-
-    captcha_post_response = requests.post('https://2captcha.com/in.php', data=captcha_form_data).json()
-    print(f'Sent captcha to be solved using sitekey ({captcha_form_data["googlekey"]}) '
-          f'for {captcha_form_data["pageurl"]}.')
-
-    captcha_get_parameters = {
-        'key': os.getenv('2CAPTCHA_API_KEY'),
-        'action': 'get',
-        'id': captcha_post_response['request'],
-        'json': 1
-    }
-
-    time.sleep(15)
-    print(f'Getting Captcha Response for Request ID: {captcha_get_parameters["id"]}.')
-    captcha_get_response = requests.get('https://2captcha.com/res.php', params=captcha_get_parameters).json()
-    captcha_token = captcha_get_response['request']
-    print(f'Captcha Token Status: {captcha_get_response["status"]}, Response: {captcha_token}')
-
-    retries = 0
-    while captcha_token == 'CAPCHA_NOT_READY':
-        if retries >= max_retries:
-            driver.close()
-            solveCaptcha(soup_=soup_, url=url)
-        time.sleep(5)
-        print(f'Getting Captcha Response for Request ID: {captcha_get_parameters["id"]}.')
-        captcha_get_response = requests.get('https://2captcha.com/res.php', params=captcha_get_parameters).json()
-        captcha_token = captcha_get_response['request']
-        print(f'Captcha Token Status: {captcha_get_response["status"]}, Response: {captcha_token}')
-        retries += 1
-
-    print('Submitting Captcha')
-    driver.execute_script(f'document.getElementById("g-recaptcha-response").innerHTML="{captcha_token}";')
-    driver.execute_script(f'reCAPTCHACallBack();')
-
-    # time.sleep(3)
-    print(driver.page_source)
-    exit()
-
-    return soup(driver.text, 'html.parser')
-
-
 # Check for CAPTCHA
 if 'Are you a human?' in initial_soup.text:
     print('CAPTCHA REQUIRED! Launching browser.')
-    solveCaptcha(initial_soup, initial_response.url)
+    initial_soup = solve_captcha(initial_soup, initial_response.url)
 
 # Get number of pages for results
 pages = initial_soup.find(class_='list-tool-pagination-text')
@@ -130,11 +59,30 @@ if pages is not None:
     page_amount = int(pages.text.split("/", 1)[1])
     print(f'Page Count: {page_amount}')
 
+# Ask how many pages to scrape for
+max_page_amount = 1
+if page_amount > 1:
+    max_page_amount = input('What page would you like to scrape until (inclusive)? ').strip()
+    while not isinstance(max_page_amount, int):
+        try:
+            max_page_amount = int(max_page_amount)
+        except:
+            print('Invalid page amount.')
+            max_page_amount = input('What page would you like to scrape until (inclusive)? ').strip()
+    if max_page_amount > page_amount:
+        max_page_amount = page_amount
+    elif max_page_amount < 1:
+        max_page_amount = 1
+print(f'Scraping {max_page_amount} pages.\n')
 
+# All features found via webscraping (some products may not have certain features)
 list_of_all_features = []
+# All items found across all pages
 items = []
 
-for page_number in range(1, page_amount + 1):
+# Check items on all pages
+# for page_number in range(1, page_amount + 1):
+for page_number in range(1, max_page_amount + 1):
     amount_of_items_on_page = 0
 
     if 'ID-' in initial_response.url and page_number > 1:
@@ -144,24 +92,27 @@ for page_number in range(1, page_amount + 1):
         page_url = f'{initial_response.url}'
     else:
         page_url = f'{initial_response.url}&page={page_number}'
+        # page_url = f'{initial_response.url}&PageSize=96&page={page_number}'
     print(f'Scraping Page {page_number}/{page_amount}: {page_url}')
 
     # Get response from desired Newegg page URL
     page_response = requests.get(page_url, headers=page_headers)
     page_html = page_response.text
 
-
     # Parse HTML
     page_soup = soup(page_html, 'html.parser')
 
     # Check for CAPTCHA
     if 'Are you a human?' in page_soup.text:
-        print('CAPTCHA REQUIRED! Launching browser.')
-        page_soup = solveCaptcha(page_soup, page_response.url)
+        print('\tCAPTCHA REQUIRED! Launching browser.')
+        page_soup = solve_captcha(page_soup, page_response.url)
 
     # Get item containers
     containers = page_soup.find_all('div', class_='item-container')
 
+    # Check all items on the page and retrieve item data stored in Python dictionary
+    # All data in item data is key:single value except for the key "feature_list"
+    #       which maps to another Python dictionary (feature_name:feature_value)
     for container in containers:
         item_data = {}
 
@@ -208,14 +159,14 @@ for page_number in range(1, page_amount + 1):
 
         # Try to get item cost
         try:
-            item_cost_tag = container.find(class_='price-current')
-            item_cost_dollars = item_cost_tag.strong.text.replace('\n', ' | ').strip()
-            item_cost_cents = item_cost_tag.sup.text.replace('\n', ' | ').strip()
-            item_cost = f'${item_cost_dollars}{item_cost_cents}'
+            item_price_tag = container.find(class_='price-current')
+            item_price_dollars = item_price_tag.strong.text.replace('\n', ' | ').strip()
+            item_price_cents = item_price_tag.sup.text.replace('\n', ' | ').strip()
+            item_price = f'${item_price_dollars}{item_price_cents}'
         except:
-            item_cost = unfound_data_string
+            item_price = unfound_data_string
         finally:
-            item_data['item_cost'] = item_cost
+            item_data['item_price'] = item_price
 
         # Check if item is shipped by newegg
         if container.find(class_='shipped-by-newegg') is not None:
@@ -234,8 +185,79 @@ for page_number in range(1, page_amount + 1):
 
         items.append(item_data)
         amount_of_items_on_page += 1
-    print(f'Number of Items Found: {amount_of_items_on_page}')
+    print(f'\tNumber of Items Found: {amount_of_items_on_page}\n')
 
+if is_data_saved:
+    # Save all items to items.xlsx
+    # Item Data:
+    # items[x]['brand'] = brand of item
+    # items[x]['name'] = name of item
+    # items[x]['url'] = url to the item page
+    # items[x]['feature_list'] = feature list of item stored in Python dictionary
+    # items[x]['item_promotion'] = applicable item promotion
+    # items[x]['item_price'] = cost of item
+    # items[x]['is_shipped_by_newegg'] = True/False if item is shipped by Newegg
+    # items[x]['shipping_cost'] = cost of shipping
 
-for item in items:
-    print(item)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    # worksheet_headers = ['Brand', 'Name', 'URL', list_of_all_features, 'Promotion',
+    #                      'Price', 'Shipped By Newegg?', 'Shipping Cost']
+    worksheet_headers = {
+        'Brand': 'brand',
+        'Name': 'name',
+        'URL': 'url',
+        'Features': 'feature_list',
+        'Promotion': 'item_promotion',
+        'Price': 'item_price',
+        'Shipped By Newegg?': 'is_shipped_by_newegg',
+        'Shipping Cost': 'shipping_cost'
+    }
+
+    mapped_worksheet_headers = {}
+    header_row = 1
+    column_count = 1
+    for header in worksheet_headers:
+        if header == 'Features':
+            for feature in list_of_all_features:
+                mapped_worksheet_headers[feature] = {
+                    'column': column_count,
+                    'tag': worksheet_headers.get(header),
+                    'feature': feature
+                }
+                ws.cell(row=header_row, column=column_count).value = feature
+                column_count += 1
+        else:
+            mapped_worksheet_headers[header] = {
+                'column': column_count,
+                'tag': worksheet_headers.get(header)
+            }
+            ws.cell(row=header_row, column=column_count).value = header
+            column_count += 1
+
+    item_row = 2
+    for item in items:
+
+        for header in mapped_worksheet_headers.values():
+            try:
+                ws.cell(row=item_row, column=header['column']).value = item[header['tag']]
+            except:
+                try:
+                    ws.cell(row=item_row, column=header['column']).value = item[header['tag']].get(header['feature'])
+                except:
+                    ws.cell(row=item_row, column=header['column']).value = unfound_data_string
+
+        try:
+            url_cell = ws.cell(row=item_row, column=mapped_worksheet_headers.get('URL')['column'])
+            url_cell.hyperlink = item[mapped_worksheet_headers.get('URL')['tag']]
+            url_cell.style = 'Hyperlink'
+        except:
+            pass
+        item_row += 1
+
+    wb.save(f'items.xlsx')
+    print('Data saved to items.xlsx')
+else:
+    for item in items:
+        print(item)
+    print(f'{len(items)} items found.')
